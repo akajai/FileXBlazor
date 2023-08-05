@@ -1,0 +1,313 @@
+﻿@page "/fetchdrive"
+@using FileXBlazor.Data
+@using FileXBlazor.Models;
+@using System.Diagnostics;
+@inject WeatherForecastService ForecastService
+@inject DriveService DriveService;
+
+<h3>Drive</h3>
+<h1>Drives in the computer</h1>
+
+<p>This component demonstrates fetching data from drive service.</p>
+
+@if (folderInfos == null)
+{
+    <p><em>Loading...</em></p>
+}
+else
+{
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>DriveFormat</th>
+                <th>VolumeLabel</th>
+                <th>TotalSize</th>
+                <th>TotalFreeSpace</th>
+                <th>AvailableFreeSpace</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var folder in folderInfos)
+            {
+                <tr>
+                    <td>@folder.Name</td>
+                    <td>@folder.DriveFormat</td>
+                    <td>@folder.VolumeLabel</td>
+                    <td>@folder.TotalSize</td>
+                    <td>@folder.TotalFreeSpace</td>
+                    <td>@folder.AvailableFreeSpace</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+    <p>@message</p>
+    <button @onclick="HandleButtonClick">Search Me!</button>
+    <button @onclick="PauseSearch">pause!</button>
+    <button @onclick="ResumeSearch">resume!</button>
+    <p>@seqarchedFileInfo?.Count</p>
+}
+@if (seqarchedFileInfo == null)
+{
+    <p><em>Loading...</em></p>
+}
+else
+{
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>FileCount</th>
+                <th>CombinedSize</th>
+
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var file in seqarchedFileInfo)
+            {
+                <tr>
+                    <td>@file.DirectoryPath</td>
+                    <td>@file.FileCount</td>
+                    <td>@file.CombinedSize</td>
+
+                </tr>
+            }
+        </tbody>
+    </table>
+
+    <p>@endmessage</p>
+
+
+
+
+}
+@code {
+    private TaskCompletionSource<bool> pauseTaskCompletionSource;
+    private CancellationTokenSource cancellationTokenSource;
+
+    private WeatherForecast[] forecasts;
+    private List<FolderInfo> folderInfos;
+    static private List<SearchResult> seqarchedFileInfo;
+    private string message = "Click the button to see the result.";
+    private string endmessage = "Search.";
+    protected override async Task OnInitializedAsync()
+    {
+        folderInfos = DriveService.GetAllDrives();
+        //forecasts = await ForecastService.GetForecastAsync(DateTime.Now);
+    }
+    private async Task HandleButtonClick()
+    {
+        seqarchedFileInfo = new List<SearchResult>();
+        cancellationTokenSource = new CancellationTokenSource();
+        pauseTaskCompletionSource = new TaskCompletionSource<bool>();
+
+        //while(true)
+        {
+            message = new Random().NextDouble().ToString();
+            StateHasChanged();
+            await InvokeAsync(async () =>
+            {
+                endmessage = "Searching..";
+                await InvokeAsync(StateHasChanged);
+
+                await Task.Run(() => FindDirectoriesWithLargeFiles("C:\\", 10 * 1024 * 1024, cancellationTokenSource.Token));
+                //await Task.Run(() => SearchFilesAsync("C:\\", new CancellationToken()));
+                endmessage = "Searching ended..";
+                await InvokeAsync(StateHasChanged); // Notify Blazor to update the UI
+
+            }
+            );
+        }
+    }
+
+    private void PauseSearch()
+    {
+        cancellationTokenSource?.Cancel();
+        cancellationTokenSource?.CancelAfter(200);
+
+    }
+
+    private void ResumeSearch()
+    {
+        cancellationTokenSource = new CancellationTokenSource();
+        pauseTaskCompletionSource?.SetResult(true);
+    }
+
+
+
+
+    public async Task<List<string>> FindDirectoriesWithLargeFiles(string drivePath, long fileSizeThreshold, CancellationToken cancellationToken)
+    {
+        List<string> directories = new List<string>();
+        await SearchDirectories(drivePath, fileSizeThreshold, directories, cancellationToken);
+        return directories;
+    }
+    private readonly SemaphoreSlim semaphore = new SemaphoreSlim(Environment.ProcessorCount);
+
+    public async Task SearchFilesAsync(string directoryPath, CancellationToken cancellationToken)
+    {
+        // Reset the search results list
+        seqarchedFileInfo.Clear();
+
+        try
+        {
+            // Start the file search in a background thread
+            await Task.Run(() =>
+            {
+                // Use Parallel.ForEach to process files in parallel
+                Parallel.ForEach(Directory.EnumerateFiles(directoryPath, "*", SearchOption.AllDirectories), async (filePath, state) =>
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    try
+                    {
+                        var fileInfo = new FileInfo(filePath);
+
+                        // Check if the file is larger than 10 MB
+                        if (fileInfo.Length > 10 * 1024 * 1024) // 10 MB in bytes
+                        {
+                            lock (seqarchedFileInfo)
+                            {
+                                // Update the searchResults list with the found directory path, file count, and combined size
+                                var directoryInfo = new DirectoryInfo(Path.GetDirectoryName(filePath));
+                                var directoryPath = directoryInfo.FullName;
+                                var directoryResult = seqarchedFileInfo.FirstOrDefault(result => result.DirectoryPath == directoryPath);
+
+                                if (directoryResult == null)
+                                {
+                                    directoryResult = new SearchResult { DirectoryPath = directoryPath };
+                                    seqarchedFileInfo.Add(directoryResult);
+
+                                }
+
+                                //Interlocked.Increment(ref directoryResult.FileCount);
+                                //Interlocked.Add(ref directoryResult.CombinedSize, fileInfo.Length);
+                            }
+                            await InvokeAsync(StateHasChanged);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        endmessage = ex.Message;
+                        await InvokeAsync(StateHasChanged);
+                    }
+                });
+            }, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+
+            // Handle the cancellation if the search is paused or canceled
+        }
+        catch (Exception ex)
+        {
+            endmessage = ex.Message;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+    private async Task CheckIfPaused(CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            // If the TaskCompletionSource is not set (i.e., not paused), the task will wait here until it's set to resume.
+            await pauseTaskCompletionSource.Task;
+        }
+    }
+    private async Task SearchDirectories(string directoryPath, long fileSizeThreshold, List<string> result, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await CheckIfPaused(cancellationToken);
+            DirectoryInfo directoryInfo = new DirectoryInfo(directoryPath);
+
+            // Check for large files directly in the current directory
+            foreach (var file in directoryInfo.GetFiles())
+            {
+                await CheckIfPaused(cancellationToken);
+                if (file.Length > fileSizeThreshold)
+                {
+                    //await Task.Delay(1000);
+                    await InvokeAsync(async () =>
+           {
+               result.Add(directoryInfo.FullName);
+               SearchResult sr = seqarchedFileInfo.FirstOrDefault(f => f.DirectoryPath == directoryInfo.FullName);
+               if (sr == null)
+               {
+                   sr = new SearchResult { CombinedSize = file.Length, DirectoryPath = directoryInfo.FullName };
+                   seqarchedFileInfo.Add(sr);
+
+               }
+               else
+               {
+                   int index = seqarchedFileInfo.IndexOf(sr);
+                   sr.FileCount++;
+                   sr.CombinedSize += file.Length;
+                   seqarchedFileInfo[index] = sr;
+                   //seqarchedFileInfo.
+               }
+               await InvokeAsync(StateHasChanged);
+               FileSystemWatcher watcher = new FileSystemWatcher
+                   {
+                       Path = sr.DirectoryPath,
+                       IncludeSubdirectories = true, // Monitor subdirectories as well
+                       EnableRaisingEvents = true
+                   };
+
+               // Subscribe to events
+               watcher.Created += OnFileChanged;
+               watcher.Deleted += OnFileChanged;
+               watcher.Changed += OnFileChanged;
+
+           });
+                    // StateHasChanged();
+                    // break;
+                }
+            }
+
+            // Recursively search subdirectories
+            foreach (var subDirectory in directoryInfo.GetDirectories())
+            {
+                await CheckIfPaused(cancellationToken);
+                await SearchDirectories(subDirectory.FullName, fileSizeThreshold, result, cancellationToken);
+            }
+        }
+        catch (Exception ex)
+        {
+            // Handle any exceptions that may occur during the search
+            // For simplicity, we're not rethrowing the exception or providing detailed error handling.
+            // In a real-world application, you should handle exceptions more gracefully.
+            Console.WriteLine($"Error while searching files: {ex.Message}");
+        }
+    }
+    private static void OnFileChanged(object sender, FileSystemEventArgs e)
+    {
+        // Perform the desired action here when a file is created, deleted, changed, or renamed
+        Console.WriteLine($"File: {e.FullPath}, ChangeType: {e.ChangeType}");
+        string dirname = Path.GetDirectoryName(e.FullPath);
+        var fileInfo = new FileInfo(e.FullPath);
+        SearchResult sr = seqarchedFileInfo.FirstOrDefault(f => f.DirectoryPath == dirname);
+        if (sr!=null)
+        {
+            int index = seqarchedFileInfo.IndexOf(sr);
+            if (e.ChangeType == WatcherChangeTypes.Created)
+            {
+                sr.FileCount++;
+                sr.CombinedSize += fileInfo.Length;
+                seqarchedFileInfo[index] = sr;
+            }
+            else if (e.ChangeType == WatcherChangeTypes.Deleted)
+            {
+
+                sr.FileCount--;
+                sr.CombinedSize -= fileInfo.Length;
+                seqarchedFileInfo[index] = sr;
+            }
+            else if (e.ChangeType == WatcherChangeTypes.Changed)
+            {
+                // Handle file size change here
+                sr.CombinedSize -= fileInfo.Length;
+                seqarchedFileInfo[index] = sr;
+            }
+        }
+    }
+
+}
